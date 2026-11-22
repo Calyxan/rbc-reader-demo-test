@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>RBC Reader Test</title>
+<meta name="theme-color" content="#05326e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="RBC Reader">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#05326e;color:#fff;font:16px/1.5 -apple-system,system-ui,sans-serif;padding:max(16px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(24px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+h1{font:800 20px/1.2 ui-monospace,Menlo,monospace;letter-spacing:.04em;margin:4px 0 4px}
+p{margin:4px 0 14px;color:#a9bbd6;font-size:14px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+button,label.btn{font:700 14px ui-monospace,Menlo,monospace;color:#fff;background:#05326e;border:3px solid #fff;padding:12px 14px;min-height:44px;box-shadow:3px 3px 0 #02193d;cursor:pointer;display:inline-flex;align-items:center}
+label.btn{background:#b19f6c}
+button:disabled{opacity:.4}
+.opt{display:flex;align-items:center;gap:8px;font-size:15px;color:#fff;min-height:44px}
+.opt input{width:22px;height:22px}
+pre{background:#042657;border:3px solid #fff;padding:12px;font:13px/1.45 ui-monospace,Menlo,monospace;white-space:pre;overflow-x:auto;min-height:160px;margin:0}
+#status{color:#e8de8c;min-height:1.5em}
+input[type=file]{display:none}
+</style>
+</head>
+<body>
+<h1>RBC READER TEST</h1>
+<p>Pick one or more Retro Bowl College screenshots. They're read on this phone and nothing is uploaded.</p>
+<div class="row">
+  <label class="btn" for="file">PICK SCREENSHOTS</label>
+  <input type="file" id="file" accept="image/*" multiple>
+  <button id="copy" disabled>COPY TEXT</button>
+  <button id="save" disabled>SAVE .TXT</button>
+</div>
+<label class="opt"><input type="checkbox" id="raw"> Also show a raw read of the whole screen</label>
+<div id="status"></div>
+<pre id="out">Nothing read yet.</pre>
+<canvas id="cv" style="display:none"></canvas>
+<script>
+// ===== Pixel-font reader for Retro Bowl College screenshots =====
+// Reference layout is 2622x1206; regions scale to the actual image size.
+const REF_W = 2622, REF_H = 1206;
+
+function makeScreen(imgData) {
+  const { width: W, height: H, data } = imgData;
+  const mask = new Uint8Array(W * H);
+  for (let i = 0, p = 0; i < W * H; i++, p += 4) {
+    // text is light (white / grey / gold / yellow); background is navy (R<25)
+    mask[i] = data[p] > 80 ? 1 : 0;
+  }
+  return { W, H, data, mask, sx: W / REF_W, sy: H / REF_H };
+}
+
+function runs(arr) {
+  const out = []; let s = -1;
+  for (let i = 0; i < arr.length; i++) {
+    if (arr[i] && s < 0) s = i;
+    if (!arr[i] && s >= 0) { out.push([s, i]); s = -1; }
+  }
+  if (s >= 0) out.push([s, arr.length]);
+  return out;
+}
+
+function colorClass(r, g, b) {
+  if (r > 225 && g > 225 && b > 225) return 'white';
+  if (b > r + 15) return 'grey';
+  if (r > 205 && g > 195) return 'yellow';
+  if (r > g && g > b && r - b > 40) return 'gold';
+  return 'white';
+}
+
+// Read text lines from a region given in reference coordinates.
+function readRegion(S, x0r, y0r, x1r, y1r) {
+  const x0 = Math.round(x0r * S.sx), x1 = Math.round(x1r * S.sx);
+  const y0 = Math.round(y0r * S.sy), y1 = Math.round(y1r * S.sy);
+  const { W, mask, data } = S;
+  const rowHas = new Uint8Array(y1 - y0);
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) if (mask[y * W + x]) { rowHas[y - y0] = 1; break; }
+  }
+  const lines = [];
+  const bands = runs(rowHas).filter(([a, b]) => b - a >= 12 * S.sy);
+  const hs = bands.map(([a, b]) => b - a).sort((p, q) => p - q);
+  const sMed = hs.length ? hs[Math.floor((hs.length - 1) / 2)] / 7 : 1;
+  for (const [a, b] of bands) {
+    const by0 = y0 + a, by1 = y0 + b, h = by1 - by0;
+    let s = h / 7, rows = 7;
+    if (s > 1.08 * sMed) { s = sMed; rows = Math.round(h / s); }
+    const colHas = new Uint8Array(x1 - x0);
+    for (let x = x0; x < x1; x++) {
+      for (let y = by0; y < by1; y++) if (mask[y * W + x]) { colHas[x - x0] = 1; break; }
+    }
+    const glyphs = [];
+    for (const [c0, c1] of runs(colHas)) {
+      const gx0 = x0 + c0, gx1 = x0 + c1, w = gx1 - gx0;
+      const n = Math.max(1, Math.round(w / s));
+      let bits = '';
+      for (let j = 0; j < rows; j++) {
+        const yy = Math.floor(by0 + (j + 0.5) * h / rows);
+        for (let i = 0; i < n; i++) {
+          const xx = Math.floor(gx0 + (i + 0.5) * w / n);
+          bits += mask[yy * W + xx] ? '1' : '0';
+        }
+      }
+      let R = 0, G = 0, B = 0, k = 0;
+      for (let y = by0; y < by1; y += 2) for (let x = gx0; x < gx1; x += 2) {
+        const p = (y * W + x) * 4;
+        if (data[p] > 120) { R += data[p]; G += data[p + 1]; B += data[p + 2]; k++; }
+      }
+      glyphs.push({ x0: gx0 / S.sx, x1: gx1 / S.sx, n, key: n + ':' + bits, rows, s,
+        color: k ? colorClass(R / k, G / k, B / k) : 'white' });
+    }
+    lines.push({ y0: by0 / S.sy, y1: by1 / S.sy, s, glyphs });
+  }
+  return lines;
+}
+
+const DIGITS = '0123456789';
+const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+function hamming(a, b) { let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++; return d; }
+
+// classify one glyph; allowed = string of allowed chars or null
+function classify(g, allowed) {
+  if (g.n > 9) return { ch: '|', d: 0 }; // long rule line
+  let bits = g.key.slice(g.key.indexOf(':') + 1);
+  if (g.rows === 8) {
+    const tail = bits.slice(7 * g.n);
+    if (tail.includes('1')) { if (!allowed || allowed.includes('Q')) return { ch: 'Q', d: 0 }; }
+    bits = bits.slice(0, 7 * g.n);
+  } else if (g.rows !== 7) return { ch: '?', d: 99 };
+  let best = null, bd = 1e9;
+  for (const [key, ch] of TEMPLATE_LIST) {
+    if (allowed && !allowed.includes(ch)) continue;
+    const c = key.indexOf(':');
+    if (+key.slice(0, c) !== g.n) continue;
+    const tb = key.slice(c + 1);
+    if (tb.length !== bits.length) continue;
+    const d = hamming(bits, tb);
+    if (d < bd) { bd = d; best = ch; }
+  }
+  return best ? { ch: best, d: bd } : { ch: '?', d: 99 };
+}
+
+// group glyphs of a line into words
+function words(line, allowedFn) {
+  const out = []; let cur = null;
+  for (const g of line.glyphs) {
+    const gap = cur ? (g.x0 - cur.x1) * 1 : 0;
+    if (!cur || gap > 3.6 * line.s / 1) {
+      cur = { x0: g.x0, x1: g.x1, text: '', glyphs: [], d: 0, colors: {} };
+      out.push(cur);
+    }
+    cur.glyphs.push(g); cur.x1 = g.x1;
+  }
+  for (const w of out) {
+    const allowed = allowedFn ? allowedFn(w) : null;
+    for (const g of w.glyphs) {
+      const c = classify(g, allowed);
+      w.text += c.ch; w.d = Math.max(w.d, c.d);
+      w.colors[g.color] = (w.colors[g.color] || 0) + 1;
+    }
+    w.color = Object.entries(w.colors).sort((a, b) => b[1] - a[1])[0][0];
+    w.cx = (w.x0 + w.x1) / 2;
+  }
+  return out;
+}
+
+function goldFrac(S, x0r, y0r, x1r, y1r) {
+  let gold = 0, tot = 0;
+  for (let y = Math.round(y0r * S.sy); y < y1r * S.sy; y += 3)
+    for (let x = Math.round(x0r * S.sx); x < x1r * S.sx; x += 3) {
+      const p = (y * S.W + x) * 4, r = S.data[p], g = S.data[p + 1], b = S.data[p + 2];
+      tot++; if (r > 150 && r < 200 && g > 140 && g < 180 && b > 80 && b < 130) gold++;
+    }
+  return gold / tot;
+}
+const TEMPLATE_LIST=[["6:111110110011110011110011110011110011111110","D"],["6:111111110000110000111110110000110000111111","E"],["6:111110110011110011110011111110110011110011","R"],["6:000111001111011011110011110011111111000011","4"],["6:011110110011110011011110110011110011011110","8"],["6:011110110011110011000110110011110011011110","3"],["6:011110110011110000111110110011110011011110","6"],["6:011110110011110011110011111111110011110011","A"],["6:110000110000110000110000110000110000111111","L"],["6:000111000011000011000011110011110011011110","J"],["7:1000001110001111101111111111110101111000111100011","M"],["6:011110110011110000011110000011110011011110","S"],["6:011110110011110011000110001100011000111111","2"],["4:0110111001100110011001101111","1"],["6:111111000011000110001100011000110000111111","Z"],["6:011110110011110011110000110011110011011110","C"],["6:111110110011110011110011111110110000110000","P"],["6:011110110011110011110011110011110011011110","O"],["6:011110110011110011011111000011110011011110","9"],["6:111110110011110011111110110011110011111110","B"],["6:111111000011000110000110001100001100001100","7"],["6:110011110011110011011110001100001100001100","Y"],["6:011110110011110111111111111011110011011110","0"],["6:110011110011110110111100110110110011110011","K"],["6:110011110011110011110011110011110011011110","U"],["6:111111110000111110000011110011110011011110","5"],["7:1100011110101111010111101011110101101101100110110","W"],["4:1111011001100110011001101111","I"],["6:110011110011011110001100011110110011110011","X"],["6:111111001100001100001100001100001100001100","T"],["4:0011011011001100110001100011","("],["5:00011000110011000110011000110011000","/"],["4:1100011000110011001101101100",")"],["6:110011110011111011111111110111110011110011","N"],["6:110011110011110011110011110011011110001100","V"],["6:110011110011110011111111110011110011110011","H"],["6:011110110011110011110000110111110011011110","G"],["6:111111110000110000111110110000110000110000","F"],["6:111111001100001100001100001100001100001100000000","T"],["6:011110110011110011110011111111110011110011000000","A"],["6:111110110011110011110011111110110011110011000000","R"],["6:011110110011110011000110001100011000111111000000","2"],["6:011110110011110000111110110011110011011110000000","6"],["4:01101110011001100110011011110000","1"],["6:011110110011110011011110110011110011011110000000","8"],["6:111111110000110000111110110000110000111111000000","E"],["7:10000011100011111011111111111101011110001111000110000000","M"],["6:110000110000110000110000110000110000111111000000","L"],["6:011110110011110011110000110111110011011110000000","G"],["6:111110110011110011110011110011110011111110000000","D"],["6:110011110011110011110011110011011110001100000000","V"],["6:011110110011110011000110110011110011011110000000","3"],["6:011110110011110111111111111011110011011110000000","0"],["6:011110110011110011110000110011110011011110000000","C"],["6:011110110011110011110011110011110011011110000011","Q"],["2:00000000001111","."],["4:0110111001100110011001111111","1"],["6:011110111111110011000110001100011100111111","2"],["6:011110111111110000011110000111110111011110","S"],["6:110011110011111011111111111111110011110011","N"],["6:011110111111110011010111110011111111011110","3"],["6:111111001110001100001100001100001100001100","T"],["6:011110111111110011111111111111110011110011","A"],["6:110000110000110000110000110000111000111111","L"],["5:01110110111101111011110111101101110","O"],["6:000111001111011111110011111111111111000011","4"],["6:011110111111110011111111111111111111110011","A"],["7:1000001110001111111111111111110101111000111100011","M"],["6:011110110011110011110111111111110011110011","A"],["6:110011110011111111111111110111110011110011","N"],["6:110001110011000110001100011000110011100011","%"],["2:00000011110000","|"],["6:000000000000000000111111111111000000000000","-"],["6:011110111111110011110010110111111111011110","G"],["6:011110111111110000011110000011111111011110","S"],["7:1100011110101111010111101011111101101111100110110","W"],["4:1111011101100110011001111111","I"],["6:110011110011110011110011110011011110011110","W"],["5:00000000000000011111111110000000000","-"],["6:001100011100001100001100001100001100111111","1"],["7:0111110110001100001110011110011110011100001111111","2"]];
+</script>
+<script>
+{
+const $ = s => document.querySelector(s);
+const NUM = '0123456789', LET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+let text = '';
+const fixed = (ws, set) => ws.map(w => w.glyphs.map(g => classify(g, set).ch).join('')).join(' ');
+const conf = ws => Math.max(0, ...ws.map(w => w.d));
+const byX = (ws, lo, hi) => ws.filter(w => w.cx >= lo && w.cx < hi);
+const lines = (S, r) => readRegion(S, ...r).map(l => words(l));
+const pad = (s, n) => String(s).padEnd(n);
+let unsure = 0;
+const mark = d => { if (d > 2) { unsure++; return ' ?'; } return ''; };
+
+function readSchedule(S) {
+  const title = lines(S, [1000, 150, 1620, 197]).flat().filter(w => !/\|/.test(w.text)).map(w => w.text).join(' ');
+  let out = `Type: SCHEDULE   Title: ${title}\n`;
+  for (const ln of lines(S, [395, 230, 2230, 760])) {
+    const halves = [[0, 1310], [1310, 3000]].map(([lo, hi]) => {
+      const ws = byX(ln, lo, hi).filter(w => !/^\|+$/.test(w.text));
+      if (ws.length !== 4) return pad(ws.map(w => w.text).join(' ') + ' ?', 18);
+      const sets = [LET, NUM, NUM, LET];
+      const t = ws.map((w, i) => fixed([w], sets[i]));
+      const gold = ws.some(w => w.color === 'gold') ? '*' : ' ';
+      return pad(`${gold}${pad(t[0], 4)}${t[1].padStart(3)}-${pad(t[2], 3)}${t[3]}${mark(conf(ws))}`, 20);
+    });
+    out += halves.join('  ') + '\n';
+  }
+  return out;
+}
+function rankLine(ln, X) {
+  const rk = byX(ln, ...X[0]), nm = byX(ln, ...X[1]), w = byX(ln, ...X[2]), l = byX(ln, ...X[3]);
+  const gold = [...rk, ...nm].some(x => x.color === 'gold') ? '*' : ' ';
+  return `${gold}${pad(fixed(rk, NUM + '()'), 8)}${pad(fixed(nm, LET + '.'), 14)}${fixed(w, NUM).padStart(3)}-${fixed(l, NUM)}${mark(conf([...rk, ...nm, ...w, ...l]))}\n`;
+}
+function readRankings(S) {
+  const poll = goldFrac(S, 1340, 150, 1760, 280) > goldFrac(S, 850, 150, 1270, 280) ? 'MINOR' : 'MAJOR';
+  const yr = fixed(lines(S, [770, 335, 930, 385]).flat(), NUM);
+  let out = `Type: RANKINGS (${poll})   Year: ${yr}\n`;
+  for (const ln of lines(S, [760, 385, 1800, 955])) out += rankLine(ln, [[700, 1000], [1000, 1540], [1540, 1690], [1690, 1810]]);
+  return out;
+}
+function readResult(S) {
+  let out = 'Type: RESULT\n';
+  const cells = [[330, 590], [613, 703], [722, 814], [835, 925], [946, 1037], [1058, 1225]];
+  for (const [y0, y1] of [[157, 258], [350, 450]]) {
+    const vals = cells.map(([a, b], i) => { const ws = lines(S, [a, y0, b, y1]).flat(); return { t: fixed(ws, i ? NUM : LET).replace(/[|]/g, '') || '_', d: conf(ws), gold: ws.some(w => w.color === 'gold') }; });
+    out += `${vals.some(v => v.gold) ? '*' : ' '}${pad(vals[0].t, 5)} Q: ${vals.slice(1, 5).map(v => v.t.padStart(2)).join(' ')}  = ${vals[5].t}${mark(Math.max(...vals.map(v => v.d)))}\n`;
+  }
+  out += `Fans: ${fixed(lines(S, [640, 585, 910, 625]).flat(), NUM + 'FANS%')}\n`;
+  out += `Conference: ${lines(S, [370, 800, 1210, 845]).flat().map(w => w.text).join(' ').split('|')[0].trim()}\n`;
+  for (const ln of lines(S, [360, 860, 1200, 1135])) out += rankLine(ln, [[360, 470], [470, 940], [940, 1060], [1060, 1200]]);
+  out += 'Major rankings:\n';
+  for (const ln of lines(S, [1340, 185, 2300, 915])) out += rankLine(ln, [[1340, 1580], [1580, 2060], [2060, 2180], [2180, 2310]]);
+  return out;
+}
+function readRaw(S) {
+  return lines(S, [0, 0, 2622, 1206]).map(ws => ws.map(w => w.text).join(' ').replace(/\|+/g, '|')).filter(t => t.replace(/[|? ]/g, '')).join('\n');
+}
+
+async function readOne(file) {
+  const bmp = await createImageBitmap(file);
+  const c = $('#cv'); c.width = bmp.width; c.height = bmp.height;
+  const ctx = c.getContext('2d', { willReadFrequently: true }); ctx.drawImage(bmp, 0, 0);
+  const S = makeScreen(ctx.getImageData(0, 0, bmp.width, bmp.height));
+  let out = `== ${file.name} (${bmp.width}x${bmp.height}) ==\n`;
+  if (Math.abs(bmp.width / bmp.height - 2622 / 1206) > 0.03) out += 'Warning: unusual size, probably cropped. Positions may be off.\n';
+  const title = lines(S, [1000, 150, 1620, 197]).flat().map(w => w.text).join('');
+  const hdr = lines(S, [1330, 125, 2330, 170]).flat().map(w => w.text).join('');
+  if (/WEEK/.test(title) || goldFrac(S, 1510, 1045, 1900, 1170) > 0.25) out += readSchedule(S);
+  else if (goldFrac(S, 1085, 1045, 1480, 1170) > 0.25) out += readRankings(S);
+  else if (/RANK|MAJOR|MINOR/.test(hdr)) out += readResult(S);
+  else out += 'Type: not recognised (not a Schedule, Ranking or Result screen)\n';
+  if ($('#raw').checked) out += '-- raw read --\n' + readRaw(S) + '\n';
+  return out;
+}
+
+$('#file').addEventListener('change', async e => {
+  const files = [...e.target.files]; e.target.value = '';
+  if (!files.length) return;
+  text = ''; unsure = 0;
+  const t0 = performance.now();
+  for (let i = 0; i < files.length; i++) {
+    $('#status').textContent = `Reading ${i + 1} of ${files.length}…`;
+    try { text += await readOne(files[i]) + '\n'; } catch (err) { text += `== ${files[i].name} ==\nCould not read: ${err}\n\n`; }
+    $('#out').textContent = text;
+  }
+  $('#status').textContent = `Done: ${files.length} screenshot${files.length > 1 ? 's' : ''} in ${((performance.now() - t0) / 1000).toFixed(1)}s. ${unsure ? unsure + ' line(s) marked ? are uncertain.' : 'No uncertain characters.'} * = gold (your team).`;
+  $('#copy').disabled = $('#save').disabled = false;
+});
+$('#copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(text); $('#status').textContent = 'Copied.'; }
+  catch (e) { const r = document.createRange(); r.selectNodeContents($('#out')); getSelection().removeAllRanges(); getSelection().addRange(r); $('#status').textContent = 'Copy was blocked, so the text is selected. Copy it by hand.'; }
+});
+$('#save').addEventListener('click', async () => {
+  const file = new File([text], 'rbc-read.txt', { type: 'text/plain' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'RBC read' }); return; }
+  } catch (e) { if (e.name === 'AbortError') return; }
+  try { const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = file.name; document.body.appendChild(a); a.click(); a.remove(); }
+  catch (e) { $('#status').textContent = 'Saving is blocked here. Use Copy instead.'; }
+});
+if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('sw.js').catch(() => {}); } catch (e) {} }
+}
+</script>
+</body>
+</html>
